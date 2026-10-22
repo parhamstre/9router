@@ -106,20 +106,23 @@ export async function getSettings() {
   return mergeWithDefaults(raw);
 }
 
-// Atomic read-merge-write inside transaction (prevents losing concurrent updates)
+// Atomic update using json_patch (safe for concurrent async D1 or local sync)
 export async function updateSettings(updates) {
   const db = await getAdapter();
-  let next;
-  db.transaction(function () {
-    const row = db.get(`SELECT data FROM settings WHERE id = 1`);
-    const current = row ? parseJson(row.data, {}) : {};
-    next = { ...current, ...updates };
-    db.run(
-      `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
-      [stringifyJson(next)],
-    );
-  });
-  return mergeWithDefaults(next);
+  const patchStr = stringifyJson(updates);
+
+  // If the record exists, patch it. If not, insert it with the patched empty object.
+  // json_patch is a built-in function in SQLite >= 3.38 and D1.
+  await db.run(
+    `INSERT INTO settings(id, data)
+     VALUES(1, json_patch('{}', ?))
+     ON CONFLICT(id) DO UPDATE SET data = json_patch(settings.data, excluded.data)`,
+    [patchStr]
+  );
+
+  // Read back the fresh state
+  const raw = await readRaw();
+  return mergeWithDefaults(raw);
 }
 
 export async function isCloudEnabled() {
